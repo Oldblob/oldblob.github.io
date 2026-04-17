@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<meta name="mobile-web-app-capable" content="yes">
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#000000">
     <title>Dungeon Torch</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -711,5 +712,10 @@
             new DungeonScene();
         };
     </script>
+    <script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js');
+  }
+</script>
 </body>
 </html>
