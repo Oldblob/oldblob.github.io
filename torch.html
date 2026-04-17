@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<meta name="mobile-web-app-capable" content="yes">
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dungeon Torch</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+            /* Prevent pull-to-refresh on mobile */
+            overscroll-behavior: none;
+        }
+        canvas {
+            display: block;
+        }
+        /* Hide number input spinners */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        input[type=number] {
+            -moz-appearance: textfield;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay - Adjusted for bottom placement and hiding -->
+    <div id="ui" class="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-3 w-11/12 max-w-md drop-shadow-lg transition-opacity duration-500">
+        <h1 class="text-2xl sm:text-3xl font-bold tracking-widest text-orange-500 drop-shadow-[0_0_8px_rgba(255,165,0,0.8)] text-center">DUNGEON TORCH</h1>
+        
+        <div class="flex items-center gap-3 bg-black/70 p-2 rounded-lg border border-gray-700 backdrop-blur-sm w-full justify-center shadow-lg pointer-events-auto">
+            <label for="timeInput" class="text-gray-300 text-xs sm:text-sm uppercase tracking-wider font-bold">Burn Time (min):</label>
+            <input type="number" id="timeInput" min="0.1" max="999" step="0.1" value="1" class="w-20 bg-gray-900 border border-gray-600 rounded text-center text-orange-400 font-bold p-1 outline-none focus:ring-2 focus:ring-orange-500">
+        </div>
+        
+        <button id="igniteBtn" class="pointer-events-auto px-8 py-3 bg-gradient-to-b from-orange-600 to-red-700 hover:from-orange-500 hover:to-red-600 border-2 border-orange-400 rounded text-sm font-bold uppercase tracking-widest transition-all shadow-[0_0_15px_rgba(255,100,0,0.6)] active:scale-95 w-full max-w-[200px]">
+            Ignite Torch
+        </button>
+        <div class="text-[10px] text-gray-500 uppercase tracking-widest mt-1">Tap screen to toggle UI</div>
+    </div>
+
+    <!-- Main Rendering Canvas -->
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // Particle System for the pixelated flame
+        class Particle {
+            constructor(x, y, intensity) {
+                // Wider spread for the bigger cup style
+                this.x = x + (Math.random() - 0.5) * 45; 
+                this.y = y - 5;
+                this.vx = (Math.random() - 0.5) * 30;
+                this.vy = - (Math.random() * 75 + 60) * intensity;
+                this.life = 1.0;
+                this.decay = (Math.random() * 0.5 + 0.4) / (intensity + 0.1);
+                this.size = (Math.random() * 2 + 1.5) * intensity * 1.5;
+            }
+
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+                this.life -= this.decay * dt;
+            }
+
+            draw(ctx) {
+                if (this.life <= 0) return;
+                
+                // Determine color based on remaining life
+                let r, g, b;
+                if (this.life > 0.7) { r=255; g=220; b=80; }      // Yellow center
+                else if (this.life > 0.4) { r=255; g=120; b=0; }  // Orange mid
+                else if (this.life > 0.1) { r=200; g=30; b=10; }  // Red edge
+                else { r=80; g=80; b=80; }                        // Dark smoke
+
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                
+                // Force pixelation by quantizing coordinates and sizes
+                const P_SIZE = 7; 
+                let px = Math.floor(this.x / P_SIZE) * P_SIZE;
+                let py = Math.floor(this.y / P_SIZE) * P_SIZE;
+                let ps = Math.max(1, Math.floor(this.size)) * P_SIZE;
+
+                ctx.fillRect(px, py, ps, ps);
+            }
+        }
+
+        class Critter {
+            constructor(w, h, type) {
+                this.type = type; // 'rat' or 'spider'
+                this.active = true;
+                this.animTimer = 0;
+                
+                const floorY = h - 100;
+
+                if (this.type === 'rat') {
+                    this.dir = Math.random() > 0.5 ? 1 : -1;
+                    this.x = this.dir === 1 ? -30 : w + 30;
+                    this.y = floorY + 10 + Math.random() * 50; // Constrain to floor level
+                    this.speed = 30 + Math.random() * 60;
+                    this.scale = 0.8 + Math.random() * 0.7; // Variation in size
+                    this.ratState = 'run';
+                    this.stateTimer = 1 + Math.random() * 3;
+                } else { // spider
+                    this.x = 20 + Math.random() * (w - 40);
+                    this.y = -30;
+                    this.dirX = (Math.random() - 0.5) * 40;
+                    this.dirY = 20 + Math.random() * 40;
+                    this.speed = 1; 
+                    this.state = 'dropping'; // dropping, waiting, scurrying
+                    this.targetY = 40 + Math.random() * (floorY * 0.8);
+                    this.scale = 1.0 + Math.random() * 0.5;
+                }
+            }
+            
+            update(dt, w, h) {
+                this.animTimer += dt;
+                if (this.type === 'rat') {
+                    this.stateTimer -= dt;
+                    if (this.stateTimer <= 0) {
+                        if (this.ratState === 'run') {
+                            this.ratState = 'pause';
+                            this.stateTimer = 0.5 + Math.random() * 2;
+                        } else {
+                            this.ratState = 'run';
+                            this.stateTimer = 1 + Math.random() * 4;
+                            this.speed = 30 + Math.random() * 60;
+                            this.dir = Math.random() > 0.1 ? this.dir : -this.dir; // small chance to turn around
+                        }
+                    }
+
+                    if (this.ratState === 'run') {
+                        this.x += this.dir * this.speed * dt;
+                    }
+
+                    if ((this.dir === 1 && this.x > w + 30) || (this.dir === -1 && this.x < -30)) {
+                        this.active = false;
+                    }
+                } else { // spider
+                    if (this.state === 'dropping') {
+                        this.y += this.dirY * dt;
+                        if (this.y > this.targetY) this.state = 'waiting';
+                    } else if (this.state === 'waiting') {
+                        if (Math.random() < 0.005) {
+                            this.state = 'scurrying';
+                            this.dirY = - (30 + Math.random() * 50);
+                        }
+                    } else if (this.state === 'scurrying') {
+                        this.y += this.dirY * dt;
+                        this.x += this.dirX * dt;
+                        if (this.y < -30 || this.x < -30 || this.x > w + 30) this.active = false;
+                    }
+                }
+            }
+            
+            draw(ctx) {
+                if (this.type === 'rat') {
+                    ctx.fillStyle = '#0f0f12';
+                    ctx.save();
+                    ctx.translate(this.x, this.y);
+                    if (this.dir === -1) ctx.scale(-1, 1);
+                    ctx.scale(1.5 * this.scale, 1.5 * this.scale); // Make rat bigger, with variation
+                    
+                    let isRunning = this.ratState === 'run';
+                    let walk = isRunning && Math.sin(this.animTimer * 25) > 0 ? 1 : 0;
+                    let sniff = !isRunning && Math.sin(this.animTimer * 10) > 0 ? 1 : 0;
+                    let tailWiggle = isRunning ? Math.sin(this.animTimer * 20) * 2 : Math.sin(this.animTimer * 5) * 1;
+
+                    // Body
+                    ctx.fillRect(0, -4, 14, 6);
+                    // Head (bobs down when sniffing)
+                    ctx.fillRect(14, -2 + sniff, 5, 4);
+                    // Tail (wiggles)
+                    ctx.fillRect(-10, 0 + tailWiggle, 10, 2);
+                    
+                    // Legs
+                    ctx.fillRect(2, 2, 2, 2 + walk);
+                    ctx.fillRect(10, 2, 2, 3 - walk);
+                    
+                    ctx.restore();
+                } else {
+                    ctx.save();
+                    ctx.translate(this.x, this.y);
+                    
+                    // Silk thread
+                    if (this.state === 'dropping' || this.state === 'waiting' || this.state === 'scurrying') {
+                        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+                        ctx.fillRect(0, -this.y, 1, this.y); 
+                    }
+                    
+                    ctx.scale(1.5 * this.scale, 1.5 * this.scale); // Make spider bigger
+                    ctx.fillStyle = '#050508';
+                    // Body
+                    ctx.fillRect(-3, -3, 6, 6);
+                    // Legs
+                    let wiggle = Math.sin(this.animTimer * 30) * 2;
+                    if (this.state === 'waiting') wiggle = 0;
+                    
+                    ctx.beginPath();
+                    ctx.strokeStyle = '#050508';
+                    ctx.lineWidth = 1;
+                    // Left legs
+                    ctx.moveTo(-3, 0); ctx.lineTo(-8, -4 + wiggle);
+                    ctx.moveTo(-3, 1); ctx.lineTo(-7, 2 - wiggle);
+                    ctx.moveTo(-3, 2); ctx.lineTo(-6, 6 + wiggle);
+                    // Right legs
+                    ctx.moveTo(3, 0); ctx.lineTo(8, -4 - wiggle);
+                    ctx.moveTo(3, 1); ctx.lineTo(7, 2 + wiggle);
+                    ctx.moveTo(3, 2); ctx.lineTo(6, 6 - wiggle);
+                    ctx.stroke();
+                    
+                    ctx.restore();
+                }
+            }
+        }
+
+        class DungeonScene {
+            constructor() {
+                this.canvas = document.getElementById('gameCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                
+                this.maxTime = 60;
+                this.timeLeft = this.maxTime;
+                this.lastTime = performance.now();
+                this.timeSinceDead = 0;
+                
+                this.particles = [];
+                this.critters = [];
+                this.bgCanvas = document.createElement('canvas');
+                this.bgCtx = this.bgCanvas.getContext('2d');
+
+                this.setupEvents();
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+
+                // Start loop
+                requestAnimationFrame((t) => this.loop(t));
+            }
+
+            setupEvents() {
+                const timeInput = document.getElementById('timeInput');
+                const igniteBtn = document.getElementById('igniteBtn');
+                const ui = document.getElementById('ui');
+
+                // Read input directly on ignite
+                igniteBtn.addEventListener('click', () => {
+                    let val = parseFloat(timeInput.value);
+                    if (isNaN(val) || val <= 0) val = 1;
+                    this.maxTime = val * 60; // Convert minutes to seconds
+                    this.timeLeft = this.maxTime;
+                    this.timeSinceDead = 0;
+                    // Burst of fire upon ignition
+                    for(let i=0; i<60; i++) {
+                        this.particles.push(new Particle(this.width/2, this.height * 0.45 - 10, 1.5));
+                    }
+                    // Spawn initial batch of critters instantly (Reduced by 50%)
+                    for(let i=0; i<4; i++) {
+                        this.critters.push(new Critter(this.width, this.height, 'rat'));
+                    }
+                    for(let i=0; i<1; i++) {
+                        this.critters.push(new Critter(this.width, this.height, 'spider'));
+                    }
+                    // Hide UI after ignition
+                    ui.classList.add('opacity-0', 'pointer-events-none');
+                });
+
+                // Toggle UI on canvas click
+                this.canvas.addEventListener('click', () => {
+                    ui.classList.toggle('opacity-0');
+                    ui.classList.toggle('pointer-events-none');
+                });
+            }
+
+            resize() {
+                this.width = this.canvas.width = window.innerWidth;
+                this.height = this.canvas.height = window.innerHeight;
+                this.bgCanvas.width = this.width;
+                this.bgCanvas.height = this.height;
+                this.renderStaticBackground();
+            }
+
+            renderStaticBackground() {
+                const ctx = this.bgCtx;
+                const w = this.width;
+                const h = this.height;
+                const floorY = h - 100;
+
+                // 1. Base Wall Color (Sandstone tone)
+                ctx.fillStyle = '#6e5641';
+                ctx.fillRect(0, 0, w, h);
+
+                // 2. Procedural Irregular Castle Bricks
+                ctx.strokeStyle = '#4a3525';
+                ctx.lineWidth = 3;
+                
+                for (let y = 0; y < floorY; ) {
+                    let rowH = 30 + Math.random() * 30; // Irregular row heights
+                    if (y + rowH > floorY) rowH = floorY - y;
+                    for (let x = 0; x < w; ) {
+                        let brickW = 60 + Math.random() * 80; // Irregular brick widths
+                        if (x + brickW > w) brickW = w - x;
+                        
+                        ctx.fillStyle = (Math.random() > 0.8) ? '#8a6e55' : '#7b6149';
+                        ctx.fillRect(x, y, brickW, rowH);
+                        ctx.strokeRect(x, y, brickW, rowH);
+                        
+                        // Vertical cracks and texture
+                        if (Math.random() > 0.7) {
+                            ctx.beginPath();
+                            let cx = x + 10 + Math.random() * (brickW - 20);
+                            ctx.moveTo(cx, y);
+                            ctx.lineTo(cx + (Math.random()-0.5)*15, y + rowH/2);
+                            ctx.lineTo(cx, y + rowH);
+                            ctx.stroke();
+                        }
+                        x += brickW;
+                    }
+                    y += rowH;
+                }
+
+                // 3. The Floor
+                ctx.fillStyle = '#5c4532';
+                ctx.fillRect(0, floorY, w, h - floorY);
+                ctx.strokeStyle = '#4a3525';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(0, floorY);
+                ctx.lineTo(w, floorY);
+                ctx.stroke();
+                
+                // Horizontal floor lines for depth perspective
+                let fy = floorY;
+                let step = 10;
+                while (fy < h) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, fy);
+                    ctx.lineTo(w, fy);
+                    ctx.stroke();
+                    step *= 1.3;
+                    fy += step;
+                }
+
+                // 4. Scratch Marks on the Wall
+                ctx.strokeStyle = '#523b29'; // subtle light scratch color
+                ctx.lineWidth = 2;
+                ctx.lineCap = 'round';
+                for (let i = 0; i < 8; i++) {
+                    let sx = 50 + Math.random() * (w - 100);
+                    let sy = 50 + Math.random() * (floorY - 150);
+                    
+                    ctx.save();
+                    ctx.translate(sx, sy);
+                    ctx.rotate((Math.random() - 0.5) * 0.5);
+                    let numScratches = 3 + Math.floor(Math.random() * 2);
+                    for (let j = 0; j < numScratches; j++) {
+                        ctx.beginPath();
+                        ctx.moveTo(j * 8, 0);
+                        ctx.lineTo(j * 8 + (Math.random() - 0.5) * 10, 40 + Math.random() * 50);
+                        ctx.stroke();
+                    }
+                    ctx.restore();
+                }
+
+                // 5. The Skeletons
+                // Left skeleton sitting
+                this.drawSkeleton(ctx, Math.min(200, w * 0.15), floorY - 43);
+                
+                // Right skeleton lying down face up
+                this.drawLyingSkeleton(ctx, Math.max(w - 200, w * 0.8), floorY - 6);
+            }
+
+            drawSkeleton(ctx, x, y, boneColor = '#8c8c8c', darkHole = '#0d0d0d') {
+                ctx.fillStyle = boneColor;
+
+                // Simple blocky pixel-art style rendering using rects
+                const rect = (rx, ry, rw, rh) => ctx.fillRect(x + rx, y + ry, rw, rh);
+
+                // Skull
+                rect(-15, -60, 30, 26); // Cranium
+                rect(-10, -34, 20, 8);  // Jaw
+                
+                // Eyes & Nose (dark holes)
+                ctx.fillStyle = darkHole;
+                rect(-8, -50, 6, 6); // Left eye
+                rect(2, -50, 6, 6);  // Right eye
+                rect(-2, -40, 4, 4); // Nose
+
+                // Body (Spine and Ribs)
+                ctx.fillStyle = boneColor;
+                for(let i=0; i<6; i++) rect(-3, -26 + i*7, 6, 5); // Spine
+                for(let i=0; i<4; i++) rect(-18, -22 + i*8, 36, 4); // Ribs
+                
+                // Pelvis
+                rect(-12, 16, 24, 10);
+
+                // Legs (folded, sitting)
+                rect(12, 18, 25, 6);  // Right thigh
+                rect(31, 18, 6, 25);  // Right calf
+                rect(-37, 18, 25, 6); // Left thigh
+                rect(-37, 18, 6, 25); // Left calf
+
+                // Arms (resting down)
+                rect(-24, -20, 6, 30); // Left arm
+                rect(-24, 10, 16, 5);  // Left forearm resting on thigh
+                rect(18, -20, 6, 30);  // Right arm
+                rect(8, 10, 16, 5);    // Right forearm
+            }
+
+            drawLyingSkeleton(ctx, x, y, boneColor = '#8c8c8c', darkHole = '#0d0d0d') {
+                ctx.fillStyle = boneColor;
+
+                const rect = (rx, ry, rw, rh) => ctx.fillRect(x + rx, y + ry, rw, rh);
+
+                // Head (lying on back, nose up)
+                rect(30, -20, 24, 20); // Skull
+                ctx.fillStyle = darkHole;
+                rect(42, -14, 6, 6); // Eye
+                rect(50, -18, 4, 4); // Nose (pointing up)
+                ctx.fillStyle = boneColor;
+                rect(34, -2, 18, 6); // Jaw
+
+                // Spine & Ribs
+                rect(0, -6, 30, 6); // Spine flat on floor
+                for(let i=0; i<4; i++) rect(5 + i*7, -18, 4, 12); // Ribs
+
+                // Pelvis
+                rect(-15, -10, 15, 10);
+
+                // Legs
+                rect(-40, -6, 25, 6); // Thigh 1
+                rect(-65, -6, 25, 6); // Calf 1
+                
+                // Leg 2 bent
+                rect(-35, -15, 20, 6); // Thigh 2 angled up
+                rect(-45, -25, 6, 15); // Calf 2
+                
+                // Arm
+                rect(5, 0, 20, 6); // Single arm visible from side
+            }
+
+            drawTorchHandle(ctx, cx, cy) {
+                const pSize = 9; // Was 6 - increased by 50%
+                const hColors = {
+                    'C': '#2c3e50', // Cup / Band
+                    'L': '#a0522d', // Wood light
+                    'W': '#8b4513', // Wood mid
+                    'D': '#5c2e0b', // Wood dark
+                    'S': '#9ca3af', // Mount border
+                    'A': '#4b5563'  // Mount inner
+                };
+                
+                // Wall mount bracket behind the torch (made smaller)
+                const mountMap = [
+                    "               ",
+                    "               ",
+                    "               ",
+                    "               ",
+                    "     SSSSS     ",
+                    "    SAAAAAS    ",
+                    "    SAAAAAS    ",
+                    "    SAAAAAS    ",
+                    "    SAAAAAS    ",
+                    "    SAAAAAS    ",
+                    "    SAAAAAS    ",
+                    "     SSSSS     ",
+                    "               ",
+                    "               ",
+                    "               "
+                ];
+
+                // 15-wide grid for the new wall-mounted wooden torch
+                const handleMap = [
+                    "    CCCCCCC    ",
+                    "    CCCCCCC    ",
+                    "     CCCCC     ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "      CCC      ",
+                    "      CCC      ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "      LWD      ",
+                    "       W       ",
+                    "       W       "
+                ];
+
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.translate(-pSize * 7.5, 0); // Center horizontally based on width of 15
+
+                // Draw iron wall mount first
+                for (let r = 0; r < mountMap.length; r++) {
+                    for (let c = 0; c < mountMap[r].length; c++) {
+                        let char = mountMap[r][c];
+                        if (hColors[char]) {
+                            ctx.fillStyle = hColors[char];
+                            ctx.fillRect(c * pSize, r * pSize, pSize, pSize);
+                        }
+                    }
+                }
+
+                // Draw torch handle
+                for (let r = 0; r < handleMap.length; r++) {
+                    for (let c = 0; c < handleMap[r].length; c++) {
+                        let char = handleMap[r][c];
+                        if (hColors[char]) {
+                            ctx.fillStyle = hColors[char];
+                            ctx.fillRect(c * pSize, r * pSize, pSize, pSize);
+                        }
+                    }
+                }
+                ctx.restore();
+            }
+
+            loop(now) {
+                let dt = (now - this.lastTime) / 1000;
+                this.lastTime = now;
+                // Cap dt to prevent massive jumps if tab is inactive
+                if (dt > 0.1) dt = 0.1; 
+
+                if (this.timeLeft > 0) {
+                    this.timeLeft -= dt;
+                    if (this.timeLeft <= 0) this.timeLeft = 0;
+                }
+
+                this.draw(dt);
+                requestAnimationFrame((t) => this.loop(t));
+            }
+
+            draw(dt) {
+                let intensity = this.timeLeft / this.maxTime;
+                if (this.timeLeft <= 0) {
+                    intensity = 0;
+                    this.timeSinceDead += dt; // Accrue dead time here
+                } else {
+                    this.timeSinceDead = 0;
+                }
+
+                // Center coordinates for the torch (Moved slightly up for vertical layout)
+                let cx = this.width / 2;
+                let cy = this.height * 0.45;
+
+                // Skeleton Base Coordinates
+                let sx1 = Math.min(200, this.width * 0.15);
+                let sy1 = this.height - 100 - 43; 
+                let sx2 = Math.max(this.width - 200, this.width * 0.8);
+                let sy2 = this.height - 100 - 6;
+
+                // Ghost Animation Variables
+                let ghostTime = this.timeSinceDead > 4.0 ? this.timeSinceDead - 4.0 : 0;
+                let ghostYOffset = ghostTime * 15;
+                let wobble1 = ghostTime > 0 ? Math.sin(ghostTime * 2) * 5 : 0;
+                let wobble2 = ghostTime > 0 ? Math.cos(ghostTime * 2.2) * 5 : 0;
+
+                // Local Light Centers (matching ghost bodies)
+                let gx1 = sx1;
+                let gy1 = sy1 - ghostYOffset + wobble1 - 15; 
+                let gx2 = sx2 + 30; 
+                let gy2 = sy2 - ghostYOffset + wobble2 - 10;
+
+                // 1. Draw Static Background
+                this.ctx.drawImage(this.bgCanvas, 0, 0);
+
+                // 2. Spawn and Draw Critters (spawn rate reduced 50%)
+                if (intensity > 0.1 && Math.random() < 0.04) {
+                    if (Math.random() > 0.3) {
+                        this.critters.push(new Critter(this.width, this.height, 'rat'));
+                    } else {
+                        this.critters.push(new Critter(this.width, this.height, 'spider'));
+                    }
+                }
+                
+                for (let i = this.critters.length - 1; i >= 0; i--) {
+                    let c = this.critters[i];
+                    c.update(dt, this.width, this.height);
+                    c.draw(this.ctx);
+                    if (!c.active) this.critters.splice(i, 1);
+                }
+
+                // 3. Draw Torch Handle
+                this.drawTorchHandle(this.ctx, cx, cy);
+
+                // 4. Calculate Lighting and Darkness Mask
+                let flicker = (Math.random() - 0.5) * 0.15 * intensity;
+                let currentIntensity = Math.max(0, intensity + flicker);
+                
+                let baseRadius = Math.max(this.width, this.height) * 0.6;
+                let lightRadius = Math.max(15, baseRadius * currentIntensity);
+
+                if (currentIntensity <= 0) {
+                    // Pitch black background
+                    this.ctx.fillStyle = 'rgba(0,0,0,0.98)';
+                    this.ctx.fillRect(0, 0, this.width, this.height);
+
+                    if (ghostTime > 0) {
+                        // Localized sickly green light around the ghosts
+                        let lightAlpha = Math.min(0.5, ghostTime * 0.15); // Ramp up gradually
+                        let glowRadius = 160 + Math.sin(ghostTime * 3) * 10;
+                        
+                        this.ctx.globalCompositeOperation = 'lighter';
+                        
+                        // Left ghost glow
+                        let grad1 = this.ctx.createRadialGradient(gx1, gy1, 0, gx1, gy1, glowRadius);
+                        grad1.addColorStop(0, `rgba(40, 255, 80, ${lightAlpha})`);
+                        grad1.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                        this.ctx.fillStyle = grad1;
+                        this.ctx.beginPath();
+                        this.ctx.arc(gx1, gy1, glowRadius, 0, Math.PI*2);
+                        this.ctx.fill();
+
+                        // Right ghost glow
+                        let grad2 = this.ctx.createRadialGradient(gx2, gy2, 0, gx2, gy2, glowRadius);
+                        grad2.addColorStop(0, `rgba(40, 255, 80, ${lightAlpha})`);
+                        grad2.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                        this.ctx.fillStyle = grad2;
+                        this.ctx.beginPath();
+                        this.ctx.arc(gx2, gy2, glowRadius, 0, Math.PI*2);
+                        this.ctx.fill();
+
+                        this.ctx.globalCompositeOperation = 'source-over';
+                    }
+                } else {
+                    // Radial gradient for darkness
+                    let mask = this.ctx.createRadialGradient(cx, cy - 20, 0, cx, cy - 20, lightRadius);
+                    mask.addColorStop(0, 'rgba(0, 0, 0, 0)');           // fully lit center
+                    mask.addColorStop(0.3, `rgba(0, 0, 0, ${0.4 - 0.4*intensity})`); // soft edge
+                    mask.addColorStop(0.8, 'rgba(0, 0, 0, 0.85)');      // dark outskirts
+                    mask.addColorStop(1, 'rgba(0, 0, 0, 0.98)');        // nearly pitch black bounds
+                    
+                    this.ctx.fillStyle = mask;
+                    this.ctx.fillRect(0, 0, this.width, this.height);
+                }
+
+                // 5. Draw Skeletons Easter Egg (Ghosts and Red Eyes glowing in the dark)
+                if (intensity === 0) {
+                    if (this.timeSinceDead > 2.5) {
+                        this.ctx.fillStyle = '#ff0000';
+                        this.ctx.shadowColor = '#ff0000';
+                        this.ctx.shadowBlur = 15;
+                        
+                        // Left skeleton eyes
+                        this.ctx.fillRect(sx1 - 6, sy1 - 48, 2, 2);
+                        this.ctx.fillRect(sx1 + 4, sy1 - 48, 2, 2);
+                        
+                        // Right skeleton eye (side profile, so only one eye visible)
+                        this.ctx.fillRect(sx2 + 42, sy2 - 13, 2, 2);
+                        
+                        this.ctx.shadowBlur = 0; // reset
+                    }
+
+                    // Green Glowing Ghosts rising
+                    if (ghostTime > 0) {
+                        let ghostAlpha = Math.min(0.6, ghostTime * 0.3); // Fade in
+                        
+                        this.ctx.save();
+                        this.ctx.globalAlpha = ghostAlpha;
+                        this.ctx.shadowColor = '#4ade80'; // Bright green glow
+                        this.ctx.shadowBlur = 20;
+                        
+                        let ghostColor = `rgba(167, 243, 208, ${ghostAlpha})`; 
+                        let ghostHole = `rgba(6, 78, 59, ${ghostAlpha})`;      
+                        
+                        this.drawSkeleton(this.ctx, sx1, sy1 - ghostYOffset + wobble1, ghostColor, ghostHole);
+                        this.drawLyingSkeleton(this.ctx, sx2, sy2 - ghostYOffset + wobble2, ghostColor, ghostHole);
+                        
+                        this.ctx.restore();
+                    }
+
+                    // Auto-reveal UI when torch dies completely
+                    const ui = document.getElementById('ui');
+                    if (ui.classList.contains('opacity-0') && this.maxTime > 0) {
+                        ui.classList.remove('opacity-0', 'pointer-events-none');
+                    }
+                }
+
+                // 6. Update and Draw Flame Particles on top of darkness
+                if (currentIntensity > 0) {
+                    // Spawn new particles (increased spawn rate for wider cup)
+                    let spawnRate = Math.floor(currentIntensity * 6) + (Math.random() > 0.5 ? 2 : 0);
+                    for (let i = 0; i < spawnRate; i++) {
+                        this.particles.push(new Particle(cx, cy - 10, currentIntensity));
+                    }
+                }
+
+                // Iterate backwards to remove dead particles safely
+                for (let i = this.particles.length - 1; i >= 0; i--) {
+                    let p = this.particles[i];
+                    p.update(dt);
+                    p.draw(this.ctx);
+                    if (p.life <= 0) {
+                        this.particles.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        // Initialize the app once the window loads
+        window.onload = () => {
+            new DungeonScene();
+        };
+    </script>
+</body>
+</html>
